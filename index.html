@@ -397,6 +397,8 @@
     #topbar{padding:12px 16px;}
     .row-variavel{grid-template-columns:1fr 60px 66px 60px 26px;gap:6px;}
     .row-variavel .num{font-size:11px;}
+    .row-recuperacao{grid-template-columns:1fr 1fr !important;row-gap:8px;}
+    .row-recuperacao button.row-del{grid-column:1/-1;justify-self:end;}
     .form-grid{grid-template-columns:1fr 1fr;}
     table.sheet-table{min-width:700px;}
     .field input, .field select, .row input.row-value, .row-variavel input.row-value{font-size:16px;}
@@ -1141,7 +1143,7 @@ function orcamentoHTML(){
       ${(state.budget.recuperacoes||[]).map(r=>{
         const valor = recuperacaoItemMonth(mi, r);
         const manualValue = (r.valoresManuais||[])[mi] || 0;
-        return `<div class="row" style="grid-template-columns:1fr 150px 90px 90px 30px;gap:8px;">
+        return `<div class="row row-recuperacao" style="grid-template-columns:1fr 150px 90px 90px 30px;gap:8px;">
           <input class="row-label" data-recup-field="nome" data-recup-id="${r.id}" value="${esc(r.nome)}" placeholder="Nome da fonte">
           <select data-recup-field="categoria" data-recup-id="${r.id}" style="border:1px solid var(--ledger-line);border-radius:8px;padding:5px 6px;background:var(--paper);color:var(--ink);font-size:13px;">
             <option value="">Categoria... (manual)</option>
