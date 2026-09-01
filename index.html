@@ -502,6 +502,8 @@ let state = {
   visaoGeralExcluded: [], // categorias clicadas para sair do total, na Visão geral
   editingCartaoId: null, // id do lançamento do cartão sendo editado inline, ou null
   filtroCartaoId: '', // filtra "Gastos do mês" por cartão; '' = todos
+  cartaoMonthIndex: 7, // navegação de mês PRÓPRIA da aba Cartão (independente do resto do app)
+  cartaoYear: 2026,    // navegação de ano PRÓPRIA da aba Cartão — só ela pode sair de 2026
   planilhaMonthView: 12, // 6 ou 12 meses visíveis
   planilhaStyle: 'moderno', // 'moderno' | 'classico'
   confirmModal: null,
@@ -768,12 +770,12 @@ function cartaoTransactionsForMonth(mi, year){
     return d.getMonth()===mi && d.getFullYear()===year;
   });
 }
-function gastoPorCartao(mi, cartaoId){
-  const s = prevMonthYear(mi, YEAR); // vencimento: mês M cobra a competência de M-1
+function gastoPorCartao(mi, cartaoId, year){
+  const s = prevMonthYear(mi, year!==undefined ? year : YEAR); // vencimento: mês M cobra a competência de M-1
   return cartaoTransactionsForMonth(s.mi, s.year).filter(t=>(t.cartaoId||'')===cartaoId).reduce((s,t)=> s+(Number(t.valor)||0),0);
 }
-function variavelGastoCategoria(mi, categoriaLabel){
-  const s = prevMonthYear(mi, YEAR); // vencimento: mês M cobra a competência de M-1
+function variavelGastoCategoria(mi, categoriaLabel, year){
+  const s = prevMonthYear(mi, year!==undefined ? year : YEAR); // vencimento: mês M cobra a competência de M-1
   return cartaoTransactionsForMonth(s.mi, s.year).filter(t=>t.categoria===categoriaLabel).reduce((s,t)=> s+(Number(t.valor)||0),0);
 }
 function variavelTotalMonth(mi){
@@ -786,7 +788,8 @@ function recuperacaoItemMonth(mi, item){
     const gasto = variavelGastoCategoria(mi, item.categoria);
     return Math.max(0, gasto - (Number(item.franquia)||0));
   }
-  return Number((item.valoresManuais||[])[mi]) || 0;
+  if(item.valoresManuais) return Number(item.valoresManuais[mi]) || 0; // formato antigo (recorrente todo mês)
+  return (item.mes===mi) ? (Number(item.valor)||0) : 0; // formato novo: só vale no mês em que foi criada
 }
 /** Soma de todas as recuperações de despesa cadastradas (Mãe, ou qualquer outra fonte que você adicionar). */
 function recuperacaoTotalMonth(mi){
@@ -797,7 +800,8 @@ function recuperacaoTotalMonth(mi){
 function recuperacaoCategoriasFullTotal(mi){
   return (state.budget.recuperacoes||[]).reduce((s,r)=>{
     if(r.categoria) return s + variavelGastoCategoria(mi, r.categoria);
-    return s + (Number((r.valoresManuais||[])[mi]) || 0);
+    if(r.valoresManuais) return s + (Number(r.valoresManuais[mi]) || 0);
+    return s + ((r.mes===mi) ? (Number(r.valor)||0) : 0);
   }, 0);
 }
 /** Linha informativa "Total de despesas líquido": Total do cartão sem a Mãe (reembolsável) inteira nem as demais recuperações — só pra referência, não entra no Saldo. */
@@ -845,7 +849,7 @@ function renderSidebar(){
 }
 function renderTopbar(){
   const el = document.getElementById('topbar');
-  const showMonthNav = !['planilha','investimentos','bens'].includes(state.activeTab);
+  const showMonthNav = !['planilha','investimentos','bens','cartao'].includes(state.activeTab);
   el.innerHTML = `
     ${showMonthNav ? `
     <div class="month-nav">
@@ -865,6 +869,17 @@ function prevMonthYear(mi, year){
   let pm = mi-1, py = year;
   if(pm<0){ pm = 11; py = year-1; }
   return {mi:pm, year:py};
+}
+function prevCartaoMonth(){
+  const s = prevMonthYear(state.cartaoMonthIndex, state.cartaoYear);
+  state.cartaoMonthIndex = s.mi; state.cartaoYear = s.year;
+  renderMain();
+}
+function nextCartaoMonth(){
+  let nm = state.cartaoMonthIndex+1, ny = state.cartaoYear;
+  if(nm>11){ nm = 0; ny = ny+1; }
+  state.cartaoMonthIndex = nm; state.cartaoYear = ny;
+  renderMain();
 }
 /* ============================= DASHBOARD ============================= */
 function dashboardHTML(){
@@ -1149,21 +1164,23 @@ function orcamentoHTML(){
       <div class="totals-row"><span>Total de despesas</span><span class="num" id="tot-variavel">${fmt(limiteTotal)}</span></div>
 
       <div class="section-title">Recuperações de despesa <span style="font-weight:400;text-transform:none;letter-spacing:0;">— dinheiro que volta (reembolsos)</span></div>
-      <p class="hint" style="margin:-4px 0 10px;">Vincule a uma categoria do cartão (calcula sozinho) ou deixe "Categoria..." e digite o valor do mês na mão.</p>
+      <p class="hint" style="margin:-4px 0 10px;">Vincule a uma categoria do cartão (calcula sozinho, todo mês) ou deixe "Categoria..." — nesse caso, a recuperação vale só pra este mês (${MONTHS[mi]}).</p>
       <div class="rows-scroll"><div class="rows-scroll-inner">
-      ${(state.budget.recuperacoes||[]).map(r=>{
+      ${(state.budget.recuperacoes||[]).filter(r=> r.categoria || r.valoresManuais || r.mes===mi).map(r=>{
         const valor = recuperacaoItemMonth(mi, r);
-        const manualValue = (r.valoresManuais||[])[mi] || 0;
+        const isLegacyManual = !r.categoria && r.valoresManuais;
+        const manualValue = isLegacyManual ? ((r.valoresManuais||[])[mi] || 0) : (r.valor||0);
+        const manualField = isLegacyManual ? 'valorManual' : 'valor';
         return `<div class="row row-recuperacao" style="grid-template-columns:minmax(160px,1fr) 150px 90px 90px 30px;gap:8px;">
           <input class="row-label" data-recup-field="nome" data-recup-id="${r.id}" value="${esc(r.nome)}" placeholder="Nome da fonte">
           <select data-recup-field="categoria" data-recup-id="${r.id}" style="border:1px solid var(--ledger-line);border-radius:8px;padding:5px 6px;background:var(--paper);color:var(--ink);font-size:13px;">
-            <option value="">Categoria... (manual)</option>
+            <option value="">Categoria... (só ${MONTHS[mi]})</option>
             ${state.budget.variaveis.map(v=>`<option value="${esc(v.label)}" ${v.label===r.categoria?'selected':''}>${esc(v.label)}</option>`).join('')}
           </select>
           ${r.categoria
             ? `<input class="row-value num" type="number" step="0.01" min="0" data-recup-field="franquia" data-recup-id="${r.id}" value="${r.franquia||''}" placeholder="franquia">
                <span class="num" style="color:var(--verde);align-self:center;text-align:right;">${fmt(valor)}</span>`
-            : `<input class="row-value num" type="number" step="0.01" min="0" data-recup-field="valorManual" data-recup-id="${r.id}" value="${manualValue||''}" placeholder="0,00" title="Valor de ${MONTHS[mi]}" style="grid-column:span 2;">`
+            : `<input class="row-value num" type="number" step="0.01" min="0" data-recup-field="${manualField}" data-recup-id="${r.id}" value="${manualValue||''}" placeholder="0,00" title="Valor de ${MONTHS[mi]}" style="grid-column:span 2;">`
           }
           <button class="row-del" data-action="remove-recuperacao" data-id="${r.id}" aria-label="Remover">×</button>
         </div>`;
@@ -1238,22 +1255,30 @@ function refreshOrcamentoTotals(){
 /* ============================= CARTÃO ============================= */
 function cartaoHTML(){
   const sub = state.cartaoSubTab || 'lancamentos';
+  const navHTML = `
+    <div class="month-nav" style="margin-bottom:16px;">
+      <button data-action="prev-cartao-month" aria-label="Mês anterior">‹</button>
+      <span class="month-label">${MONTHS[state.cartaoMonthIndex]} de ${state.cartaoYear}</span>
+      <button data-action="next-cartao-month" aria-label="Próximo mês">›</button>
+    </div>
+  `;
   const switcherHTML = `
     <div class="subtab-switch">
       <button type="button" class="subtab-btn ${sub==='lancamentos'?'active':''}" data-action="cartao-subtab" data-sub="lancamentos">${icon('card',15)} Lançamentos</button>
-      <button type="button" class="subtab-btn ${sub==='visaogeral'?'active':''}" data-action="cartao-subtab" data-sub="visaogeral">${icon('grid',15)} Visão geral (${YEAR})</button>
+      <button type="button" class="subtab-btn ${sub==='visaogeral'?'active':''}" data-action="cartao-subtab" data-sub="visaogeral">${icon('grid',15)} Visão geral (${state.cartaoYear})</button>
       <button type="button" class="subtab-btn ${sub==='limites'?'active':''}" data-action="cartao-subtab" data-sub="limites">${icon('wallet',15)} Limites</button>
     </div>
   `;
   const body = sub==='visaogeral' ? cartaoVisaoGeralHTML() : (sub==='limites' ? cartaoLimitesHTML() : cartaoLancamentosHTML());
-  return switcherHTML + body;
+  return navHTML + switcherHTML + body;
 }
 
 function cartaoLimitesHTML(){
-  const mi = state.monthIndex;
+  const mi = state.cartaoMonthIndex;
+  const year = state.cartaoYear;
   const cartoes = state.cartoes || [];
   const totalLimite = cartoes.reduce((s,c)=> s+(Number(c.limite)||0), 0);
-  const totalGasto = cartoes.reduce((s,c)=> s+gastoPorCartao(mi, c.id), 0);
+  const totalGasto = cartoes.reduce((s,c)=> s+gastoPorCartao(mi, c.id, year), 0);
   return `
     <div class="panel">
       <div class="panel-header"><h2>Cadastrar cartão</h2><span class="hint">Nome do cartão e limite total dele</span></div>
@@ -1268,11 +1293,11 @@ function cartaoLimitesHTML(){
     <div class="panel">
       <div class="panel-header">
         <h2>Limites por cartão</h2>
-        <span class="hint">Gasto de ${MONTHS[mi]} (vencimento — competência do mês anterior) · Limite total: <strong class="num">${fmt(totalLimite)}</strong></span>
+        <span class="hint">Gasto de ${MONTHS[mi]}/${year} (vencimento — competência do mês anterior) · Limite total: <strong class="num">${fmt(totalLimite)}</strong></span>
       </div>
       ${cartoes.length===0 ? `<div class="empty-state">Nenhum cartão cadastrado ainda. Cadastre acima os cartões que você usa e o limite de cada um.</div>` : `
         ${cartoes.map(c=>{
-          const gasto = gastoPorCartao(mi, c.id);
+          const gasto = gastoPorCartao(mi, c.id, year);
           const limite = Number(c.limite)||0;
           const pct = limite>0 ? Math.min(100,(gasto/limite)*100) : (gasto>0?100:0);
           const over = limite>0 && gasto>limite;
@@ -1305,8 +1330,9 @@ function addCartaoLimiteFromForm(){
 }
 
 function cartaoLancamentosHTML(){
-  const mi = state.monthIndex;
-  const allTransacoes = cartaoTransactionsForMonth(mi, YEAR).sort((a,b)=> a.data<b.data?1:-1);
+  const mi = state.cartaoMonthIndex;
+  const year = state.cartaoYear;
+  const allTransacoes = cartaoTransactionsForMonth(mi, year).sort((a,b)=> a.data<b.data?1:-1);
   const allLabels = state.budget.variaveis.map(v=>v.label);
   const cartoes = state.cartoes || [];
   const filtro = state.cartaoFiltro; // null = todas, senão array de labels selecionadas
@@ -1347,7 +1373,7 @@ function cartaoLancamentosHTML(){
 
     <div class="panel" id="print-area">
       <div class="panel-header">
-        <h2>Gastos de ${MONTHS[mi]}</h2>
+        <h2>Gastos de ${MONTHS[mi]}${year!==YEAR?'/'+year:''}</h2>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           ${cartoes.length>0 ? `
           <select class="no-print" id="f-filtro-cartaoid" style="border:1px solid var(--ledger-line);border-radius:8px;padding:5px 8px;font-size:12.5px;background:var(--paper);color:var(--ink);">
@@ -1358,7 +1384,7 @@ function cartaoLancamentosHTML(){
           <button type="button" class="btn-ghost no-print" data-action="print-cartao" title="Imprimir ou salvar como PDF">${icon('printer',15)} Imprimir / PDF</button>
         </div>
       </div>
-      <p class="print-only-header">Gastos do cartão — ${MONTHS[mi]} de ${YEAR} · Categorias: ${filtro===null?'Todas':(filtro.length?filtro.join(', '):'nenhuma selecionada')} · Total: ${fmt(total)}</p>
+      <p class="print-only-header">Gastos do cartão — ${MONTHS[mi]} de ${year} · Categorias: ${filtro===null?'Todas':(filtro.length?filtro.join(', '):'nenhuma selecionada')} · Total: ${fmt(total)}</p>
       <div class="no-print">${chipsHTML}</div>
       ${transacoes.length===0 ? `<div class="empty-state">${allTransacoes.length===0 ? 'Nenhum gasto lançado neste mês ainda. Use o formulário acima para começar.' : (filtro && filtro.length===0 ? 'Nenhuma categoria selecionada no filtro.' : 'Nenhum gasto nas categorias/cartão selecionados neste mês.')}</div>` : `
         <div class="table-scroll"><table>
@@ -1408,18 +1434,19 @@ function cartaoLancamentosHTML(){
 }
 
 function cartaoVisaoGeralHTML(){
+  const year = state.cartaoYear;
   const labels = state.budget.variaveis.map(v=>v.label);
   const excluded = state.visaoGeralExcluded || [];
   const includedLabels = labels.filter(l=> !excluded.includes(l));
-  const monthTotals = MONTHS.map((_,mi)=> includedLabels.reduce((s,l)=> s+variavelGastoCategoria(mi,l), 0));
+  const monthTotals = MONTHS.map((_,mi)=> includedLabels.reduce((s,l)=> s+variavelGastoCategoria(mi,l,year), 0));
   const grandTotal = monthTotals.reduce((a,b)=>a+b,0);
   const today = new Date(2026,7,20);
-  const currentRealMonth = today.getFullYear()===YEAR ? today.getMonth() : -1;
+  const currentRealMonth = today.getFullYear()===year ? today.getMonth() : -1;
 
   return `
     <div class="panel">
       <div class="panel-header">
-        <h2>Visão geral — gastos por categoria</h2>
+        <h2>Visão geral — gastos por categoria (${year})</h2>
         <span class="hint">Total do ano: <strong class="num" style="color:var(--ink);font-weight:700;">${fmt(grandTotal)}</strong></span>
       </div>
       <div class="sheet-scroll">
@@ -1434,7 +1461,7 @@ function cartaoVisaoGeralHTML(){
           <tbody>
             ${labels.map(label=>{
               const isOff = excluded.includes(label);
-              const rowVals = MONTHS.map((_,mi)=> variavelGastoCategoria(mi,label));
+              const rowVals = MONTHS.map((_,mi)=> variavelGastoCategoria(mi,label,year));
               const rowTotal = rowVals.reduce((a,b)=>a+b,0);
               return `
                 <tr class="${isOff?'sheet-row-off':''}">
@@ -2005,6 +2032,8 @@ function handleClick(e){
   switch(action){
     case 'prev-month': prevMonth(); break;
     case 'next-month': nextMonth(); break;
+    case 'prev-cartao-month': prevCartaoMonth(); break;
+    case 'next-cartao-month': nextCartaoMonth(); break;
     case 'refresh-data': refreshData(); break;
     case 'reset-data': resetToBlank(); break;
     case 'modal-cancel': closeConfirm(); break;
@@ -2023,7 +2052,7 @@ function handleClick(e){
     case 'print-cartao': window.print(); break;
     case 'add-cartaolimite': addCartaoLimiteFromForm(); break;
     case 'del-cartaolimite': state.cartoes = (state.cartoes||[]).filter(c=>c.id!==id); saveCartoes(); renderMain(); break;
-    case 'go-to-month': state.monthIndex = parseInt(btn.dataset.mi,10); state.cartaoSubTab='lancamentos'; renderMain(); break;
+    case 'go-to-month': state.cartaoMonthIndex = parseInt(btn.dataset.mi,10); state.cartaoSubTab='lancamentos'; renderMain(); break;
     case 'toggle-visaogeral-cat': {
       const lbl = btn.dataset.label;
       const cur = state.visaoGeralExcluded || [];
@@ -2047,7 +2076,7 @@ function handleClick(e){
     case 'remove-varGroup-item': { const g=(state.budget.variaveisGroups||[]).find(g=>g.id===groupId); if(g) g.items=g.items.filter(i=>i.id!==id); saveBudget(); renderMain(); break; }
 
     case 'add-variavel': state.budget.variaveis.push({id:uid(), label:'Nova categoria', limite:0}); saveBudget(); renderMain(); break;
-    case 'add-recuperacao': (state.budget.recuperacoes=state.budget.recuperacoes||[]).push({id:uid(), nome:'Nova recuperação', categoria:'', franquia:0, valoresManuais:new Array(12).fill(0)}); saveBudget(); renderMain(); break;
+    case 'add-recuperacao': (state.budget.recuperacoes=state.budget.recuperacoes||[]).push({id:uid(), nome:'Nova recuperação', categoria:'', franquia:0, mes:state.monthIndex, valor:0}); saveBudget(); renderMain(); break;
     case 'remove-recuperacao': state.budget.recuperacoes = (state.budget.recuperacoes||[]).filter(r=>r.id!==id); saveBudget(); renderMain(); break;
     case 'remove-variavel': state.budget.variaveis = state.budget.variaveis.filter(v=>v.id!==id); saveBudget(); renderMain(); break;
 
@@ -2102,6 +2131,7 @@ function handleInput(e){
         if(!item.valoresManuais) item.valoresManuais = new Array(12).fill(0);
         item.valoresManuais[state.monthIndex] = parseFloat(el.value)||0;
       }
+      else if(field==='valor') item.valor = parseFloat(el.value)||0;
       saveBudget();
       if(e.type==='change') renderMain(); else refreshOrcamentoTotals();
     }
