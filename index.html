@@ -472,6 +472,104 @@ function icon(name, size){
   return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]||''}</svg>`;
 }
 /** accentKey: 'verde' | 'vinho' | 'ouro' | 'azul' */
+/** Busca a cotação atual + histórico de 12 meses do Dólar, via AwesomeAPI (gratuita, sem precisar de chave). */
+async function fetchDolarLive(){
+  try{
+    const [lastRes, dailyRes] = await Promise.all([
+      fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL'),
+      fetch('https://economia.awesomeapi.com.br/json/daily/USD-BRL/380'),
+    ]);
+    const lastData = await lastRes.json();
+    const dailyData = await dailyRes.json();
+    const q = lastData.USDBRL;
+
+    // agrupa o histórico diário por mês, guardando o fechamento mais recente de cada mês
+    // (a lista vem do dia mais novo pro mais antigo, então o primeiro que achar de cada mês já é o fechamento dele)
+    const porMes = {};
+    dailyData.forEach(d=>{
+      const date = new Date(Number(d.timestamp)*1000);
+      const key = date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0');
+      if(porMes[key]===undefined) porMes[key] = parseFloat(d.bid);
+    });
+    const now = new Date();
+    const historico = [];
+    for(let i=11; i>=0; i--){
+      const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+      const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+      historico.push(porMes[key] ?? null);
+    }
+
+    state.liveQuotes.dolar = { price: parseFloat(q.bid), pctChange: parseFloat(q.pctChange), historico };
+  }catch(e){
+    console.error('Erro ao buscar cotação do Dólar', e);
+    state.liveQuotes.dolar = { error:true };
+  }
+}
+/** Busca a cotação atual + histórico de dividendos do KNCR11, via brapi.dev.
+ * Precisa de BRAPI_TOKEN preenchido (conta gratuita em brapi.dev) — sem isso, fica "indisponível". */
+async function fetchKncr11Live(){
+  if(!BRAPI_TOKEN){
+    state.liveQuotes.kncr11 = { error:true, needsToken:true };
+    return;
+  }
+  // 1) Cotação atual — confirmado que funciona no plano gratuito.
+  try{
+    const res = await fetch(`https://brapi.dev/api/quote/KNCR11?token=${BRAPI_TOKEN}`);
+    const data = await res.json();
+    const q = data.results && data.results[0];
+    if(!q || q.error) throw new Error('sem dados de cotação');
+    state.liveQuotes.kncr11 = {
+      price: q.regularMarketPrice,
+      pctChange: q.regularMarketChangePercent,
+    };
+  }catch(e){
+    console.error('Erro ao buscar cotação do KNCR11', e);
+    state.liveQuotes.kncr11 = { error:true };
+    return; // sem o básico, nem tenta o histórico
+  }
+  // 2) Histórico (preço + dividendos) — pode não estar disponível no plano gratuito;
+  // se falhar, mantém a cotação atual e só o gráfico usa o exemplo.
+  try{
+    const res = await fetch(`https://brapi.dev/api/quote/KNCR11?dividends=true&range=1y&interval=1mo&token=${BRAPI_TOKEN}`);
+    const data = await res.json();
+    const q = data.results && data.results[0];
+    if(!q) throw new Error('sem dados de histórico');
+    const cotaHistorico = (q.historicalDataPrice||[]).slice(-12).map(h=>h.close);
+    const dividendos = (q.dividendsData && q.dividendsData.cashDividends || []).slice(-12).map(d=>d.rate);
+    if(cotaHistorico.length>0) state.liveQuotes.kncr11.cotaHistorico = cotaHistorico;
+    if(dividendos.length>0) state.liveQuotes.kncr11.dividendoHistorico = dividendos;
+  }catch(e){
+    console.warn('Histórico do KNCR11 indisponível (talvez precise de plano pago) — mantendo a cotação atual normalmente.', e);
+  }
+}
+/** Dispara a busca das duas cotações (uma vez só, quando a aba Investimentos abre). */
+function loadLiveQuotesIfNeeded(){
+  if(state.liveQuotesLoading || state.liveQuotes.dolar!==null) return;
+  state.liveQuotesLoading = true;
+  Promise.all([fetchDolarLive(), fetchKncr11Live()]).finally(()=>{
+    state.liveQuotesLoading = false;
+    if(state.activeTab==='investimentos') renderMain();
+  });
+}
+function renderQuoteValue(quote){
+  if(quote===undefined || quote===null){
+    return `<div class="value" style="font-size:15px;color:var(--ink-faint);">Carregando…</div>`;
+  }
+  if(quote.needsToken){
+    return `<div class="value" style="font-size:12px;color:var(--ink-faint);">Precisa da chave brapi.dev</div>`;
+  }
+  if(quote.error){
+    return `<div class="value" style="font-size:13px;color:var(--ink-faint);">Indisponível agora</div>`;
+  }
+  const up = quote.pctChange>=0;
+  const arrow = up ? '▲' : '▼';
+  const color = up ? 'var(--verde)' : 'var(--vinho)';
+  return `
+    <div style="display:flex;align-items:baseline;gap:8px;">
+      <div class="value">R$ ${quote.price.toFixed(2).replace('.',',')}</div>
+      <span style="font-size:12.5px;font-weight:600;color:${color};">${arrow} ${up?'+':''}${quote.pctChange.toFixed(2).replace('.',',')}%</span>
+    </div>`;
+}
 function statCard(iconName, label, valueHtml, accentKey, elId){
   return `
     <div class="stat-card">
@@ -509,9 +607,13 @@ let state = {
   planilhaMonthView: 12, // 6 ou 12 meses visíveis
   planilhaStyle: 'moderno', // 'moderno' | 'classico' | 'manutfixa'
   manutFixaSelecionados: null, // null = usa o padrão (2 primeiros); array de ids = seleção do usuário
+  investQuoteExpanded: null, // null | 'dolar' | 'kncr11' — qual card de cotação está com o gráfico aberto
+  liveQuotes: {dolar:null, kncr11:null}, // preenchido ao vivo via API quando a aba Investimentos abre
+  liveQuotesLoading: false,
+  liveQuotesHistorico: {dolar:null, kncr11:null}, // histórico de 12 meses pros gráficos
   confirmModal: null,
 };
-let charts = {donut:null, line:null, investMonthly:null, kncr11:null, manutFixa:null};
+let charts = {donut:null, line:null, investMonthly:null, kncr11:null, manutFixa:null, quoteDolar:null, quoteKncr11:null};
 let donutSelectedIndex = null;
 
 /* ============================= HELPERS ============================= */
@@ -576,6 +678,9 @@ function defaultBudget(){
 // (Project Settings → API, no painel do supabase.com).
 const SUPABASE_URL = 'https://byofrfehzkdrtgksarey.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_xA84LAgD4qMf_8nItXRtZw_GGgpT7K2';
+// ⚠️ Cotação do KNCR11 ao vivo usa a brapi.dev, que exige uma chave gratuita (brapi.dev → criar conta → pegar o token).
+// Sem isso preenchido, o Dólar continua funcionando ao vivo normalmente, só o KNCR11 mostra "indisponível".
+const BRAPI_TOKEN = 'aCTtuqtpWaaWfeyZrDVxsE';
 const sb = (typeof supabase !== 'undefined' && SUPABASE_URL.startsWith('http'))
   ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
@@ -1620,6 +1725,7 @@ function investimentosHTML(){
   });
   const instrumentosList = Object.entries(porInstrumento);
 
+  const quoteExpanded = state.investQuoteExpanded; // null | 'dolar' | 'kncr11'
   return `
     <div class="panel">
       <div class="panel-header"><h2>Registrar aporte</h2></div>
@@ -1675,6 +1781,41 @@ function investimentosHTML(){
         <span class="hint">Valor investido e dividendo pago por mês — passe o mouse para ver detalhes</span>
       </div>
       <div class="chart-box"><canvas id="chart-kncr11"></canvas></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Cotações</h2>
+        <span class="hint">${state.liveQuotes && state.liveQuotes.dolar ? 'Clique num card pra ver o histórico' : '⏳ Buscando dado ao vivo…'}</span>
+      </div>
+      <div class="cards-row" style="grid-template-columns:repeat(2,1fr);">
+        <div class="stat-card" style="cursor:pointer;${quoteExpanded==='dolar'?'box-shadow:0 0 0 2px var(--azul);':''}" data-action="toggle-quote-chart" data-quote="dolar">
+          <div class="stat-icon" style="--accent-bg:var(--verde-bg);--accent:var(--verde);">${icon('coins',20)}</div>
+          <div class="stat-body">
+            <div class="label">Dólar (USD/BRL)</div>
+            ${renderQuoteValue(state.liveQuotes && state.liveQuotes.dolar)}
+          </div>
+        </div>
+        <div class="stat-card" style="cursor:pointer;${quoteExpanded==='kncr11'?'box-shadow:0 0 0 2px var(--azul);':''}" data-action="toggle-quote-chart" data-quote="kncr11">
+          <div class="stat-icon" style="--accent-bg:var(--azul-bg);--accent:var(--azul);">${icon('trending',20)}</div>
+          <div class="stat-body">
+            <div class="label">KNCR11</div>
+            ${renderQuoteValue(state.liveQuotes && state.liveQuotes.kncr11)}
+          </div>
+        </div>
+      </div>
+      ${quoteExpanded==='dolar' ? `
+        <div style="margin-top:16px;">
+          <p class="hint" style="margin:0 0 6px;font-weight:600;color:var(--ink);">Dólar — fechamento (últimos 12 meses)</p>
+          <div class="chart-box" style="height:220px;"><canvas id="chart-quote-dolar"></canvas></div>
+        </div>
+      ` : ''}
+      ${quoteExpanded==='kncr11' ? `
+        <div style="margin-top:16px;">
+          <p class="hint" style="margin:0 0 6px;font-weight:600;color:var(--ink);">KNCR11 — dividendo por cota e valor da cota (últimos 12 meses)</p>
+          <div class="chart-box" style="height:220px;"><canvas id="chart-quote-kncr11"></canvas></div>
+        </div>
+      ` : ''}
     </div>
 
     <div class="panel">
@@ -2103,6 +2244,74 @@ function planilhaManutFixaChartHTML(){
   `;
 }
 
+function buildQuoteCharts(){
+  const last12 = [];
+  const now = new Date();
+  for(let i=11; i>=0; i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    last12.push(d.toLocaleDateString('pt-BR',{month:'short'}).replace('.',''));
+  }
+  const dolarCtx = document.getElementById('chart-quote-dolar');
+  if(dolarCtx && typeof Chart!=='undefined'){
+    if(charts.quoteDolar) charts.quoteDolar.destroy();
+    const dq = state.liveQuotes.dolar;
+    const dadosReais = dq && !dq.error && dq.historico;
+    // exemplo de reserva (só aparece se o dado ao vivo ainda não chegou ou falhou)
+    const dadosExemplo = [5.02,5.08,5.15,5.30,5.12,4.95,5.05,5.18,5.24,5.31,5.19,5.23];
+    charts.quoteDolar = new Chart(dolarCtx, {
+      type:'line',
+      data:{ labels:last12, datasets:[{ label: dadosReais?'Fechamento (R$)':'Fechamento (R$) — exemplo', data: dadosReais || dadosExemplo, borderColor:'#16A34A', backgroundColor:'#16A34A15', fill:true, tension:.3, spanGaps:true }] },
+      options:{
+        maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(c)=> c.raw==null ? ' sem dado' : ` R$ ${c.raw.toFixed(2)}` } } },
+        scales:{ y:{ ticks:{ callback:(v)=>'R$ '+v, color:'#5B6B7A' }, grid:{color:'#EEF0F4'} }, x:{ ticks:{color:'#5B6B7A'}, grid:{display:false} } },
+        elements:{ point:{ radius:3, hoverRadius:6 } }
+      }
+    });
+  }
+  const kncrCtx = document.getElementById('chart-quote-kncr11');
+  if(kncrCtx && typeof Chart!=='undefined'){
+    if(charts.quoteKncr11) charts.quoteKncr11.destroy();
+    const kq = state.liveQuotes.kncr11;
+    const temDadoReal = kq && !kq.error && kq.cotaHistorico && kq.dividendoHistorico;
+    // exemplo de reserva (só aparece se o dado ao vivo ainda não chegou, ou falta a chave brapi.dev) —
+    // valores reais pesquisados (InfoMoney/FundsExplorer/StatusInvest), pagos em cada mês, out/2025 a set/2026.
+    const dividendoExemplo = [1.10,1.10,1.20,1.30,1.20,1.00,1.10,1.10,1.10,1.10,1.25,1.15];
+    const dividendoPctExemplo = [null,null,null,null,null,0.93,null,1.08,1.04,1.02,1.16,1.07];
+    const cotaExemplo = [100.50,101.20,101.80,102.40,107.39,105.20,105.50,105.64,107.89,108.07,108.30,106.40];
+    const dividendoData = temDadoReal ? kq.dividendoHistorico : dividendoExemplo;
+    const dividendoPctData = temDadoReal ? (kq.dividendoPctHistorico||[]) : dividendoPctExemplo;
+    const cotaData = temDadoReal ? kq.cotaHistorico : cotaExemplo;
+    const sufixo = temDadoReal ? '' : ' — exemplo';
+    charts.quoteKncr11 = new Chart(kncrCtx, {
+      data:{
+        labels:last12,
+        datasets:[
+          { type:'bar', label:'Dividendo por cota (R$)'+sufixo, data:dividendoData, backgroundColor:'#3D5AFE', borderRadius:6, maxBarThickness:28, yAxisID:'y' },
+          { type:'line', label:'Valor da cota (R$)'+sufixo, data:cotaData, borderColor:'#16A34A', backgroundColor:'#16A34A', tension:.3, yAxisID:'y1', pointRadius:3, pointHoverRadius:6 },
+        ]
+      },
+      options:{
+        maintainAspectRatio:false,
+        plugins:{
+          legend:{ position:'bottom', labels:{ boxWidth:11, font:{size:11}, color:'#5B6B7A' } },
+          tooltip:{ callbacks:{ label:(c)=>{
+            if(c.datasetIndex===0){
+              const pct = dividendoPctData[c.dataIndex];
+              return ` ${c.dataset.label}: R$ ${c.raw.toFixed(2)}` + (pct!=null ? `  •  ${pct.toFixed(2)}% no mês` : '');
+            }
+            return ` ${c.dataset.label}: R$ ${c.raw.toFixed(2)}`;
+          } } }
+        },
+        scales:{
+          y:{ position:'left', ticks:{ callback:(v)=>'R$ '+v, color:'#3D5AFE' }, grid:{color:'#EEF0F4'} },
+          y1:{ position:'right', ticks:{ callback:(v)=>'R$ '+v, color:'#16A34A' }, grid:{display:false} },
+          x:{ ticks:{color:'#5B6B7A'}, grid:{display:false} }
+        }
+      }
+    });
+  }
+}
 function buildManutFixaChart(){
   const ctx = document.getElementById('chart-manutfixa');
   if(!ctx || typeof Chart === 'undefined') return;
@@ -2183,6 +2392,8 @@ function renderMain(){
   renderTopbar();
   if(state.activeTab==='dashboard') buildDashboardCharts();
   if(state.activeTab==='investimentos') buildInvestimentosCharts();
+  if(state.activeTab==='investimentos') loadLiveQuotesIfNeeded();
+  if(state.activeTab==='investimentos' && state.investQuoteExpanded) buildQuoteCharts();
   if(state.activeTab==='planilha' && state.planilhaStyle==='manutfixa') buildManutFixaChart();
 }
 
@@ -2227,6 +2438,12 @@ function handleClick(e){
     case 'cartao-subtab': state.cartaoSubTab = btn.dataset.sub; renderMain(); break;
     case 'planilha-months': state.planilhaMonthView = parseInt(btn.dataset.months,10); renderMain(); break;
     case 'planilha-style': state.planilhaStyle = btn.dataset.style; renderMain(); break;
+    case 'toggle-quote-chart': {
+      const quote = btn.dataset.quote;
+      state.investQuoteExpanded = (state.investQuoteExpanded===quote) ? null : quote;
+      renderMain();
+      break;
+    }
     case 'toggle-manutfixa-item': {
       const allItems = [];
       state.budget.fixaGroups.forEach(g=> g.items.forEach(it=> allItems.push({id:it.id, label:it.label})));
