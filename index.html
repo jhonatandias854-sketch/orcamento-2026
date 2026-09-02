@@ -496,7 +496,7 @@ let state = {
   kncr11: null,
   cartoes: null,
   activeTab: 'dashboard',
-  monthIndex: 7, // Agosto (hoje é 20/08/2026)
+  monthIndex: 8, // Setembro (hoje é 02/09/2026)
   cartaoFiltro: null, // null = todas as categorias; array = subconjunto selecionado
   investFiltro: null, // null = todos os tipos; array = subconjunto selecionado
   editingInvestId: null, // id do aporte sendo editado inline, ou null
@@ -504,13 +504,14 @@ let state = {
   visaoGeralExcluded: [], // categorias clicadas para sair do total, na Visão geral
   editingCartaoId: null, // id do lançamento do cartão sendo editado inline, ou null
   filtroCartaoId: '', // filtra "Gastos do mês" por cartão; '' = todos
-  cartaoMonthIndex: 7, // navegação de mês PRÓPRIA da aba Cartão (independente do resto do app)
+  cartaoMonthIndex: 8, // navegação de mês PRÓPRIA da aba Cartão (independente do resto do app)
   cartaoYear: 2026,    // navegação de ano PRÓPRIA da aba Cartão — só ela pode sair de 2026
   planilhaMonthView: 12, // 6 ou 12 meses visíveis
-  planilhaStyle: 'moderno', // 'moderno' | 'classico'
+  planilhaStyle: 'moderno', // 'moderno' | 'classico' | 'manutfixa'
+  manutFixaSelecionados: null, // null = usa o padrão (2 primeiros); array de ids = seleção do usuário
   confirmModal: null,
 };
-let charts = {donut:null, line:null, investMonthly:null, kncr11:null};
+let charts = {donut:null, line:null, investMonthly:null, kncr11:null, manutFixa:null};
 let donutSelectedIndex = null;
 
 /* ============================= HELPERS ============================= */
@@ -1471,7 +1472,7 @@ function cartaoVisaoGeralHTML(){
   const includedLabels = labels.filter(l=> !excluded.includes(l));
   const monthTotals = MONTHS.map((_,mi)=> includedLabels.reduce((s,l)=> s+variavelGastoCategoria(mi,l,year), 0));
   const grandTotal = monthTotals.reduce((a,b)=>a+b,0);
-  const today = new Date(2026,7,20);
+  const today = new Date();
   const currentRealMonth = today.getFullYear()===year ? today.getMonth() : -1;
 
   return `
@@ -2063,10 +2064,81 @@ function planilhaHTML(){
     <div class="subtab-switch">
       <button type="button" class="subtab-btn ${style==='moderno'?'active':''}" data-action="planilha-style" data-style="moderno">${icon('grid',15)} Moderno</button>
       <button type="button" class="subtab-btn ${style==='classico'?'active':''}" data-action="planilha-style" data-style="classico">${icon('sheet',15)} Clássico (planilha)</button>
+      <button type="button" class="subtab-btn ${style==='manutfixa'?'active':''}" data-action="planilha-style" data-style="manutfixa">${icon('trending',15)} Manutenção Fixa</button>
     </div>
   `;
+  if(style==='manutfixa') return switcherHTML + planilhaManutFixaChartHTML();
   const bodyHTML = planilhaMainTableHTML() + planilhaLimiteHTML();
   return switcherHTML + (style==='classico' ? `<div class="planilha-classic">${bodyHTML}</div>` : bodyHTML);
+}
+
+/** Seleção padrão do gráfico "Manutenção Fixa": tenta achar itens de Energia/Água (igual o exemplo),
+ * senão cai nos 2 primeiros itens cadastrados. */
+function defaultManutFixaSelecionados(allItems){
+  const energia = allItems.find(it=> /energia/i.test(it.label));
+  const agua = allItems.find(it=> /água|agua/i.test(it.label));
+  const picked = [energia, agua].filter(Boolean).map(it=>it.id);
+  return picked.length>0 ? picked : allItems.slice(0,2).map(it=>it.id);
+}
+function planilhaManutFixaChartHTML(){
+  const allItems = [];
+  state.budget.fixaGroups.forEach(g=> g.items.forEach(it=> allItems.push({id:it.id, label:it.label, groupName:g.name})));
+  const selecionados = state.manutFixaSelecionados || defaultManutFixaSelecionados(allItems);
+  return `
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Manutenção Fixa — despesas ao longo do ano</h2>
+        <span class="hint">Clique nos itens abaixo para escolher quais aparecem no gráfico</span>
+      </div>
+      <div class="filter-chips" style="margin-bottom:16px;">
+        ${allItems.map(it=>{
+          const isActive = selecionados.includes(it.id);
+          return `<button type="button" class="chip ${isActive?'active':''}" data-action="toggle-manutfixa-item" data-id="${it.id}" title="${esc(it.groupName)}">${esc(it.label)}</button>`;
+        }).join('')}
+      </div>
+      ${selecionados.length===0 ? `<div class="empty-state">Selecione ao menos um item acima para ver o gráfico.</div>` : `
+        <div class="chart-box" style="height:340px;"><canvas id="chart-manutfixa"></canvas></div>
+      `}
+    </div>
+  `;
+}
+
+function buildManutFixaChart(){
+  const ctx = document.getElementById('chart-manutfixa');
+  if(!ctx || typeof Chart === 'undefined') return;
+  if(charts.manutFixa) charts.manutFixa.destroy();
+
+  const allItems = [];
+  state.budget.fixaGroups.forEach(g=> g.items.forEach(it=> allItems.push(it)));
+  const selecionados = state.manutFixaSelecionados || defaultManutFixaSelecionados(allItems);
+  const itemsToPlot = allItems.filter(it=> selecionados.includes(it.id));
+  if(itemsToPlot.length===0) return;
+
+  const datasets = itemsToPlot.map((it, i)=>({
+    label: it.label,
+    data: MONTHS.map((_,mi)=> Number(it.values[mi])||0),
+    borderColor: PALETTE[i % PALETTE.length],
+    backgroundColor: PALETTE[i % PALETTE.length],
+    tension: .3,
+    fill: false,
+  }));
+
+  charts.manutFixa = new Chart(ctx, {
+    type: 'line',
+    data: { labels: MONTHS.map(m=>m.slice(0,3)), datasets },
+    options: {
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position:'top', labels:{ boxWidth:11, font:{size:11}, color:'#5B6B7A' } },
+        tooltip: { callbacks:{ label:(c)=> ` ${c.dataset.label}: ${fmt(c.raw)}` } }
+      },
+      scales: {
+        y: { ticks:{ callback:(v)=> 'R$ '+v, color:'#5B6B7A' }, grid:{color:'#EEF0F4'} },
+        x: { ticks:{color:'#5B6B7A'}, grid:{display:false} }
+      },
+      elements: { point:{ radius:3, hoverRadius:6 } }
+    }
+  });
 }
 
 function updatePlanilhaField(el){
@@ -2111,6 +2183,7 @@ function renderMain(){
   renderTopbar();
   if(state.activeTab==='dashboard') buildDashboardCharts();
   if(state.activeTab==='investimentos') buildInvestimentosCharts();
+  if(state.activeTab==='planilha' && state.planilhaStyle==='manutfixa') buildManutFixaChart();
 }
 
 /* ============================= ACTIONS ============================= */
@@ -2154,6 +2227,16 @@ function handleClick(e){
     case 'cartao-subtab': state.cartaoSubTab = btn.dataset.sub; renderMain(); break;
     case 'planilha-months': state.planilhaMonthView = parseInt(btn.dataset.months,10); renderMain(); break;
     case 'planilha-style': state.planilhaStyle = btn.dataset.style; renderMain(); break;
+    case 'toggle-manutfixa-item': {
+      const allItems = [];
+      state.budget.fixaGroups.forEach(g=> g.items.forEach(it=> allItems.push({id:it.id, label:it.label})));
+      let current = state.manutFixaSelecionados;
+      if(current===null) current = defaultManutFixaSelecionados(allItems);
+      current = current.includes(id) ? current.filter(x=>x!==id) : [...current, id];
+      state.manutFixaSelecionados = current;
+      renderMain();
+      break;
+    }
     case 'go-to-tab': state.activeTab = btn.dataset.tab; renderMain(); break;
     case 'print-cartao': window.print(); break;
     case 'add-cartaolimite': addCartaoLimiteFromForm(); break;
